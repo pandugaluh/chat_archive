@@ -1,6 +1,7 @@
 import sqlite3
 import os
 import datetime
+import json
 
 def init_db():
     conn = sqlite3.connect("chat_archive.db")
@@ -15,6 +16,7 @@ def init_db():
                     chat_role TEXT,
                     message TEXT,
                     timestamp TEXT,
+                    source TEXT,
                     FOREIGN KEY (user_id) REFERENCES users(id)
                  )''')
     conn.commit()
@@ -33,31 +35,48 @@ def import_chat():
     choice = input("Enter your choice: ")
     
     if choice == "1":
-        user_name = input("Enter your user ID (name): ")
-        conn = sqlite3.connect("chat_archive.db")
-        c = conn.cursor()
-        c.execute("SELECT id FROM users WHERE name = ?", (user_name,))
-        user = c.fetchone()
-        if user:
-            user_id = user[0]
-        else:
-            c.execute("INSERT INTO users (name) VALUES (?)", (user_name,))
-            user_id = c.lastrowid
-        conn.commit()
-        conn.close()
-        
-        sender = input("Enter sender name: ")
-        receiver = input("Enter receiver name: ")
-        file_path = input("Enter full path of input.txt (or just input.txt if in the same directory): ")
-        if not os.path.isabs(file_path):
-            file_path = os.path.join(os.getcwd(), file_path)
-        import_whatsapp(file_path, sender, receiver, user_id)
+        import_whatsapp_chat()
     elif choice == "2":
-        print("Twitter import not available now.")
+        import_twitter_chat()
     else:
         print("Invalid choice.")
 
-def import_whatsapp(file_path, sender, receiver, user_id):
+def import_whatsapp_chat():
+    user_id = get_user_id()
+    sender = input("Enter sender name: ")
+    receiver = input("Enter receiver name: ")
+    file_path = get_file_path()
+    import_whatsapp(file_path, sender, receiver, user_id, "whatsapp")
+
+def import_twitter_chat():
+    user_id = get_user_id()
+    sender_id = input("Enter sender ID: ")
+    receiver_id = input("Enter receiver ID: ")
+    file_path = get_file_path()
+    import_twitter(file_path, sender_id, receiver_id, user_id, "twitter")
+
+def get_user_id():
+    user_name = input("Enter your user ID (name): ")
+    conn = sqlite3.connect("chat_archive.db")
+    c = conn.cursor()
+    c.execute("SELECT id FROM users WHERE name = ?", (user_name,))
+    user = c.fetchone()
+    if user:
+        user_id = user[0]
+    else:
+        c.execute("INSERT INTO users (name) VALUES (?)", (user_name,))
+        user_id = c.lastrowid
+    conn.commit()
+    conn.close()
+    return user_id
+
+def get_file_path():
+    file_path = input("Enter full path of input.txt (or just input.txt if in the same directory): ")
+    if not os.path.isabs(file_path):
+        file_path = os.path.join(os.getcwd(), file_path)
+    return file_path
+
+def import_whatsapp(file_path, sender, receiver, user_id, source):
     try:
         conn = sqlite3.connect("chat_archive.db")
         c = conn.cursor()
@@ -71,8 +90,8 @@ def import_whatsapp(file_path, sender, receiver, user_id):
                 parts = line.strip().split(" - ", 1)
                 if len(parts) == 2:
                     if message_buffer:
-                        c.execute("INSERT INTO chats (user_id, chat_role, message, timestamp) VALUES (?, ?, ?, ?)",
-                                  (user_id, chat_role, "\n".join(message_buffer), timestamp))
+                        c.execute("INSERT INTO chats (user_id, chat_role, message, timestamp, source) VALUES (?, ?, ?, ?, ?)",
+                                  (user_id, chat_role, "\n".join(message_buffer), timestamp, source))
                         print(f"Imported: {chat_role}: {' '.join(message_buffer)}")
                         message_buffer = []
                     timestamp = datetime.datetime.strptime(parts[0], "%m/%d/%y, %I:%M %p").strftime("%Y-%m-%d %H:%M:%S")
@@ -85,13 +104,41 @@ def import_whatsapp(file_path, sender, receiver, user_id):
                     message_buffer.append(line.strip())
             
             if message_buffer:
-                c.execute("INSERT INTO chats (user_id, chat_role, message, timestamp) VALUES (?, ?, ?, ?)",
-                          (user_id, chat_role, "\n".join(message_buffer), timestamp))
+                c.execute("INSERT INTO chats (user_id, chat_role, message, timestamp, source) VALUES (?, ?, ?, ?, ?)",
+                          (user_id, chat_role, "\n".join(message_buffer), timestamp, source))
                 print(f"Imported: {chat_role}: {' '.join(message_buffer)}")
         
         conn.commit()
         conn.close()
         print("WhatsApp chat imported successfully!")
+    except Exception as e:
+        print("Error importing chat:", e)
+
+def import_twitter(file_path, sender_id, receiver_id, user_id, source):
+    try:
+        conn = sqlite3.connect("chat_archive.db")
+        c = conn.cursor()
+        
+        with open(file_path, "r", encoding="utf-8") as file:
+            data = json.load(file)
+            messages = data.get("dmConversation", {}).get("messages", [])
+            
+            for message_data in messages:
+                message_obj = message_data.get("messageCreate", {})
+                message_text = message_obj.get("text", "")
+                message_timestamp = message_obj.get("createdAt", "")
+                message_sender = message_obj.get("senderId", "")
+                
+                timestamp = datetime.datetime.strptime(message_timestamp, "%Y-%m-%dT%H:%M:%S.%fZ").strftime("%Y-%m-%d %H:%M:%S")
+                chat_role = "sender" if message_sender == sender_id else "receiver"
+                
+                c.execute("INSERT INTO chats (user_id, chat_role, message, timestamp, source) VALUES (?, ?, ?, ?, ?)",
+                          (user_id, chat_role, message_text, timestamp, source))
+                print(f"Imported: {chat_role}: {message_text}")
+        
+        conn.commit()
+        conn.close()
+        print("Twitter chat imported successfully!")
     except Exception as e:
         print("Error importing chat:", e)
 
@@ -111,7 +158,7 @@ def export_chat():
     c = conn.cursor()
     c.execute("SELECT name FROM users WHERE id = ?", (user_id,))
     user_name = c.fetchone()[0]
-    c.execute("SELECT message, timestamp, chat_role FROM chats WHERE user_id = ? ORDER BY timestamp ASC", (user_id,))
+    c.execute("SELECT message, timestamp, chat_role, source FROM chats WHERE user_id = ? ORDER BY timestamp ASC", (user_id,))
     chats = c.fetchall()
     conn.close()
     
@@ -124,9 +171,13 @@ def export_chat():
             body {{ font-family: Arial, sans-serif; margin: 0; padding: 10px; }}
             .day-header {{ font-weight: bold; text-align: center; margin-top: 20px; }}
             .chat-container {{ max-width: 600px; margin: auto; }}
+            .whatsapp-sender {{ background-color: #a5d6a7; }}
+            .whatsapp-receiver {{ background-color: #dcf8c6; }}
+            .twitter-sender {{ background-color: #90caf9; }}
+            .twitter-receiver {{ background-color: #e8f5fd; }}
             .chat-block {{ display: flex; flex-direction: column; margin: 10px 0; padding: 5px; border-radius: 8px; max-width: 80%; }}
-            .left {{ background-color: #f1f0f0; align-self: flex-start; }}
-            .right {{ background-color: #dcf8c6; align-self: flex-end; text-align: right; }}
+            .left {{ align-self: flex-start; }}
+            .right {{ align-self: flex-end; text-align: right; }}
             .timestamp {{ font-size: small; color: gray; margin-bottom: 5px; }}
         </style>
     </head>
@@ -136,7 +187,7 @@ def export_chat():
     """
     
     last_date = None
-    for message, timestamp, chat_role in chats:
+    for message, timestamp, chat_role, source in chats:
         date, time = timestamp.split(" ")[0], timestamp.split(" ")[1]
         formatted_date = format_date(date)
         formatted_time = format_time(time)
@@ -144,7 +195,8 @@ def export_chat():
             html_content += f'<div class="day-header">{formatted_date}</div>'
             last_date = date
         align_class = "right" if chat_role == "sender" else "left"
-        html_content += f'<div class="chat-block {align_class}"><span class="timestamp">{formatted_time}</span><div class="chat">{message}</div></div>'
+        source_class = f"{source}-sender" if chat_role == "sender" else f"{source}-receiver"
+        html_content += f'<div class="chat-block {align_class} {source_class}"><span class="timestamp">{formatted_time}</span><div class="chat">{message}</div></div>'
     
     html_content += "</div></body></html>"
     
